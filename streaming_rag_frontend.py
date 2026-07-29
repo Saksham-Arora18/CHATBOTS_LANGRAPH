@@ -6,6 +6,22 @@ from langchain_core.messages import SystemMessage
 
 # **************************************** utility functions *************************
 
+def check_login():
+    if "user_id" not in st.session_state:
+        st.session_state["user_id"] = None
+
+    if st.session_state["user_id"] is None:
+        st.title("Login")
+        username = st.text_input("Enter your username")
+        if st.button("Continue") and username.strip():
+            st.session_state["user_id"] = username.strip()
+            st.rerun()
+        st.stop()  # blocks rest of app until logged in
+
+check_login()
+user_id = st.session_state["user_id"]
+
+
 def generate_thread_id():
     thread_id = uuid.uuid4()
     return thread_id
@@ -27,7 +43,7 @@ def load_conversation(thread_id):
 def get_chat_name(user_input):
     """Ask the LLM for a short chat title based on the first message."""
     try:
-        from complete_chatbot_backend import llm  # import your llm instance
+        from chatbot_backend_rag import llm  # import your llm instance
         messages = [
             SystemMessage(content=(
                 "Generate a short 4-5 word title for a chat that starts with the "
@@ -50,9 +66,9 @@ if 'thread_id' not in st.session_state:
     st.session_state['thread_id'] = str(generate_thread_id())
 
 if 'chat_threads' not in st.session_state:
-    st.session_state['chat_threads'] = retrieve_all_threads()
+    st.session_state['chat_threads'] = retrieve_all_threads(user_id)
 if 'thread_names' not in st.session_state:
-    st.session_state['thread_names'] = retrieve_thread_names()
+    st.session_state['thread_names'] = retrieve_thread_names(user_id)
 if "ingested_docs" not in st.session_state:
     st.session_state["ingested_docs"] = {}
 
@@ -125,7 +141,7 @@ if user_input:
     if tid_str not in st.session_state['thread_names']:               
         name = get_chat_name(user_input)                   
         st.session_state['thread_names'][tid_str] = name  
-        save_thread_name(tid_str, name)
+        save_thread_name(tid_str,user_id,name)
 
 
     # first add the message to message_history

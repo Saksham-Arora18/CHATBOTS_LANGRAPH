@@ -26,24 +26,42 @@ llm =  ChatGroq(model="llama-3.3-70b-versatile")
 embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-small-en-v1.5"
 )
+FAISS_DIR = "faiss_indexes"
+os.makedirs(FAISS_DIR, exist_ok=True)
+
 
 _THREAD_RETRIEVERS: Dict[str, Any] = {}
 _THREAD_METADATA: Dict[str, dict] = {}
 
 
 def _get_retriever(thread_id: Optional[str]):
-    """Fetch the retriever for a thread if available."""
-    if thread_id and thread_id in _THREAD_RETRIEVERS:
+    """Fetch the retriever for a thread — from RAM first, then disk."""
+    if not thread_id:
+        return None
+
+    thread_id = str(thread_id)
+
+    # 1. Check RAM cache first (fastest)
+    if thread_id in _THREAD_RETRIEVERS:
         return _THREAD_RETRIEVERS[thread_id]
+
+    # 2. Not in RAM — check disk
+    path = os.path.join(FAISS_DIR, thread_id)
+    if os.path.exists(path):
+        vector_store = FAISS.load_local(
+            path, embeddings, allow_dangerous_deserialization=True
+        )
+        retriever = vector_store.as_retriever(
+            search_type="similarity", search_kwargs={"k": 4}
+        )
+        _THREAD_RETRIEVERS[thread_id] = retriever  # cache in RAM for next time
+        return retriever
+
+    # 3. Nowhere — genuinely no document for this thread
     return None
 
 
 def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None) -> dict:
-    """
-    Build a FAISS retriever for the uploaded PDF and store it for the thread.
-
-    Returns a summary dict that can be surfaced in the UI.
-    """
     if not file_bytes:
         raise ValueError("No bytes received for ingestion.")
 
@@ -61,6 +79,10 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
         chunks = splitter.split_documents(docs)
 
         vector_store = FAISS.from_documents(chunks, embeddings)
+
+        # 👇 NEW LINE — save to disk so it survives restarts
+        vector_store.save_local(os.path.join(FAISS_DIR, str(thread_id)))
+
         retriever = vector_store.as_retriever(
             search_type="similarity", search_kwargs={"k": 4}
         )
@@ -78,12 +100,10 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
             "chunks": len(chunks),
         }
     finally:
-        # The FAISS store keeps copies of the text, so the temp file is safe to remove.
         try:
             os.remove(temp_path)
         except OSError:
             pass
-
 # -------------------
 # 2. Tools
 # -------------------
@@ -123,7 +143,8 @@ def get_stock_price(symbol: str) -> dict:
     Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA') 
     using Alpha Vantage with API key in the URL.
     """
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey=6K3Q9YU04UIYBCYT"
+    api_key = os.getenv("ALPHA_VANTAGE_KEY")
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
     r = requests.get(url)
     return r.json()
 
@@ -193,6 +214,16 @@ tool_node = ToolNode(tools)
 conn = sqlite3.connect(database="chatbot.db", check_same_thread=False)
 checkpointer = SqliteSaver(conn=conn)
 
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS thread_names (
+        thread_id TEXT,
+        user_id TEXT,
+        name TEXT,
+        PRIMARY KEY (thread_id, user_id)
+    )
+""")
+conn.commit()
+
 # -------------------
 # 6. Graph
 # -------------------
@@ -210,23 +241,25 @@ chatbot = graph.compile(checkpointer=checkpointer)
 # -------------------
 # 7. Helper
 # -------------------
-def retrieve_all_threads():
-    all_threads = set()
-    for checkpoint in checkpointer.list(None):
-        all_threads.add(checkpoint.config["configurable"]["thread_id"])
-    return list(all_threads)
-
-def save_thread_name(thread_id: str, name: str):
+def save_thread_name(thread_id: str, user_id: str, name: str):
     conn.execute(
-        "INSERT OR IGNORE INTO thread_names (thread_id, name) VALUES (?, ?)",
-        (thread_id, name)
+        "INSERT OR IGNORE INTO thread_names (thread_id, user_id, name) VALUES (?, ?, ?)",
+        (thread_id, user_id, name)
     )
     conn.commit()
 
-def retrieve_thread_names() -> dict:
-    rows = conn.execute("SELECT thread_id, name FROM thread_names").fetchall()
+def retrieve_thread_names(user_id: str) -> dict:
+    rows = conn.execute(
+        "SELECT thread_id, name FROM thread_names WHERE user_id = ?", (user_id,)
+    ).fetchall()
     return {row[0]: row[1] for row in rows}
 
+def retrieve_all_threads(user_id: str):
+    
+    rows = conn.execute(
+        "SELECT thread_id FROM thread_names WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    return [row[0] for row in rows]
 
 def thread_has_document(thread_id: str) -> bool:
     return str(thread_id) in _THREAD_RETRIEVERS
