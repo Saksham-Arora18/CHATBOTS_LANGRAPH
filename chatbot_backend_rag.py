@@ -174,7 +174,7 @@ def rag_tool(query: str, thread_id: Optional[str] = None) -> dict:
 
 
 
-tools = [search_tool, get_stock_price, calculator]
+tools = [search_tool, get_stock_price, calculator,rag_tool]
 llm_with_tools = llm.bind_tools(tools)
 
 # -------------------
@@ -187,7 +187,6 @@ class ChatState(TypedDict):
 # 4. Nodes
 # -------------------
 def chat_node(state: ChatState, config=None):
-    """LLM node that may answer or request a tool call."""
     thread_id = None
     if config and isinstance(config, dict):
         thread_id = config.get("configurable", {}).get("thread_id")
@@ -203,7 +202,18 @@ def chat_node(state: ChatState, config=None):
     )
 
     messages = [system_message, *state["messages"]]
-    response = llm_with_tools.invoke(messages, config=config)
+
+    try:
+        response = llm_with_tools.invoke(messages, config=config)
+    except Exception as e:
+        # Fallback: agar tool-call malformed ho, ek plain retry bina tools ke
+        try:
+            response = llm.invoke(messages, config=config)
+        except Exception:
+            response = AIMessage(
+                content="Sorry, kuch technical issue aaya. Please apna sawaal dobara try karo."
+            )
+
     return {"messages": [response]}
 
 tool_node = ToolNode(tools)
@@ -211,7 +221,9 @@ tool_node = ToolNode(tools)
 # -------------------
 # 5. Checkpointer
 # -------------------
-conn = sqlite3.connect(database="chatbot.db", check_same_thread=False)
+import os
+os.makedirs("data", exist_ok=True)
+conn = sqlite3.connect(database="data/chatbot.db", check_same_thread=False)
 checkpointer = SqliteSaver(conn=conn)
 
 conn.execute("""
