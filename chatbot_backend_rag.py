@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, Annotated ,Dict,Optional,Any
-from langchain_core.messages import BaseMessage, HumanMessage ,SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage ,SystemMessage,AIMessage
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph.message import add_messages
@@ -23,9 +23,14 @@ load_dotenv()
 # 1. LLM
 # -------------------
 llm =  ChatGroq(model="llama-3.3-70b-versatile")
-embeddings = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-small-en-v1.5"
-)
+_embeddings_instance = None
+
+def get_embeddings():
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        _embeddings_instance = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    return _embeddings_instance
 FAISS_DIR = "faiss_indexes"
 os.makedirs(FAISS_DIR, exist_ok=True)
 
@@ -49,7 +54,7 @@ def _get_retriever(thread_id: Optional[str]):
     path = os.path.join(FAISS_DIR, thread_id)
     if os.path.exists(path):
         vector_store = FAISS.load_local(
-            path, embeddings, allow_dangerous_deserialization=True
+            path, get_embeddings, allow_dangerous_deserialization=True
         )
         retriever = vector_store.as_retriever(
             search_type="similarity", search_kwargs={"k": 4}
@@ -78,7 +83,7 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: Optional[str] = None
         )
         chunks = splitter.split_documents(docs)
 
-        vector_store = FAISS.from_documents(chunks, embeddings)
+        vector_store = FAISS.from_documents(chunks, get_embeddings)
 
         # 👇 NEW LINE — save to disk so it survives restarts
         vector_store.save_local(os.path.join(FAISS_DIR, str(thread_id)))
